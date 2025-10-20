@@ -6,5 +6,5 @@ pandas
 Pillow
 bcrypt
 python-dotenv
-# قد تحتاج لإضافة مكتبة PIL أيضا:
-# Pillow
+Pillow
+
