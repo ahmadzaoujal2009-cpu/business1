@@ -1,10 +1,7 @@
 streamlit
-streamlit-cookie-manager
-supabase
-google-genai
-pandas
-Pillow
-bcrypt
 python-dotenv
 Pillow
+google-genai # أو openai
+supabase
+bcrypt
 
