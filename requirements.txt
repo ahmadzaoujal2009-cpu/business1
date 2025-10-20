@@ -1,6 +1,10 @@
 streamlit
-python-dotenv
-Pillow
-google-genai # أو openai
+streamlit-cookie-manager
 supabase
+google-genai
+pandas
+Pillow
 bcrypt
+python-dotenv
+# قد تحتاج لإضافة مكتبة PIL أيضا:
+# Pillow
