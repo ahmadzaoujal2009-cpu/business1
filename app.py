@@ -1,185 +1,180 @@
-import streamlit as st
-import os
-import bcrypt
-import pandas as pd
-from datetime import datetime
-from dotenv import load_dotenv
 from PIL import Image
 from google import genai 
 from supabase import create_client, Client
-import io 
+from streamlit_cookie_manager import CookieManager # إضافة إدارة الكوكيز
+# إذا كنت تستخدم OpenAI، استبدل genai بـ openai
 
+# =========================================================================
+# I. التهيئة الأساسية والثوابت (Supabase, Gemini, Cookies)
+# =========================================================================
 # -------------------- 1. الثوابت والإعداد الأولي --------------------
 
+# (نستخدم load_dotenv لقراءة المتغيرات محليًا، وتعتمد على st.secrets عند النشر)
 load_dotenv() 
 
+DB_FILE = 'users.db' # هذا أصبح غير مستخدم الآن، لكن نتركه للتوضيح
 MAX_QUESTIONS_DAILY = 5
 
+# --- إعداد الكوكيز ---
+# مفاتيح خاصة بالكوكيز - يرجى عدم تغييرها بعد النشر
+COOKIE_KEY_USER = "user_email_cookie" 
+COOKIE_KEY_LOGGED_IN = "logged_in_cookie"
+
+# إعداد الروابط الخاصة بك (لتحديثها لاحقاً)
+YOUTUBE_LINK = "https://www.youtube.com/user/YourChannelName" 
+PROJECT_LINK = "https://YourAwesomeProject.com" 
+
+# تهيئة مدير ملفات تعريف الارتباط
+cookie_manager = CookieManager()
+
+# --- تهيئة الاتصال بـ Gemini و Supabase ---
 # تهيئة الاتصال بـ Gemini و Supabase
 try:
-    API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
-    SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
-
-    if not API_KEY or not SUPABASE_URL or not SUPABASE_KEY:
-        st.error("الرجاء التأكد من إعداد جميع المفاتيح. توقف التطبيق.")
-        st.stop()
-        
-    client = genai.Client(api_key=API_KEY) 
+    # 1. جلب المفاتيح من st.secrets (أو os.getenv محليًا)
+    API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
+@@ -45,7 +32,6 @@
 
     @st.cache_resource
     def init_supabase_client(url, key):
+        """تهيئة عميل Supabase وتخزينه مؤقتاً."""
         return create_client(url, key)
-    
+
     supabase: Client = init_supabase_client(SUPABASE_URL, SUPABASE_KEY)
+@@ -65,22 +51,22 @@ def init_supabase_client(url, key):
 
-except Exception as e:
-    st.error(f"حدث خطأ في تهيئة الاتصال: {e}")
-    st.stop()
-
-
-# 2. قراءة تعليمات النظام من ملف system_prompt.txt
-try:
-    with open("system_prompt.txt", "r", encoding="utf-8") as f:
-        SYSTEM_PROMPT = f.read()
-except FileNotFoundError:
-    st.error("لم يتم العثور على ملف system_prompt.txt. توقف التطبيق.")
-    st.stop()
-    
 st.set_page_config(page_title="Math AI with zaoujal", layout="centered")
 
+# =========================================================================
+# II. دوال Supabase وإدارة المستخدمين
+# =========================================================================
 # -------------------- 3. دوال Supabase وإدارة المستخدمين --------------------
 
-@st.cache_data(ttl=60) 
+# دوال Supabase تحل محل SQLite بالكامل
+
+@st.cache_data(ttl=60) # نستخدم التخزين المؤقت للحد من استدعاءات API
 def get_user_data(email):
     """جلب بيانات المستخدم من Supabase."""
     try:
-        # جلب البيانات دون كلمة المرور المشفرة لتقليل الكاش (يمكن جلبها عند الحاجة فقط)
+        # ملاحظة: يجب أن يتطابق 'email' مع المفتاح الأساسي أو أن يكون مفهرساً
         response = supabase.table("users").select("*").eq("email", email).single().execute()
-        return response.data
+        return response.data 
+        return response.data # البيانات تكون في خاصية .data
     except Exception:
-        return None
+        return None 
+        return None # إذا لم يتم العثور على المستخدم
 
-# 🌟 دالة جديدة: تحديث كلمة المرور فقط 🌟
-def update_user_password(email, new_password):
-    """تحديث كلمة المرور المشفرة للمستخدم في Supabase."""
-    try:
-        if len(new_password) < 6:
-            return False
-            
-        # تشفير كلمة المرور الجديدة
-        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-        supabase.table("users").update({
-            "password_hash": hashed_password
-        }).eq("email", email).execute()
-        
-        # لا حاجة لمسح الكاش هنا، فقط عند تغيير التفضيلات أو التسجيل
-        return True
-    except Exception as e:
-        st.error(f"خطأ في تحديث كلمة المرور: {e}")
-        return False
-# ------------------------------------------------------------------------
-
-def add_user(email, password, grade, language, answer_style):
-    """إضافة مستخدم جديد إلى Supabase مع تفضيلاته."""
+def add_user(email, password, grade):
+    """إضافة مستخدم جديد إلى Supabase."""
+    # تشفير كلمة المرور وتشفير الـ Hash إلى سلسلة نصية (string) لتخزينها في Supabase
     hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     try:
         data = {
-            "email": email,
-            "password_hash": hashed_password,
-            "school_grade": grade,
-            "preferred_language": language, 
-            "answer_style": answer_style,
-            "last_use_date": datetime.now().strftime("%Y-%m-%d"),
-            "questions_used": 0,
-            "is_admin": False, 
+@@ -93,6 +79,7 @@ def add_user(email, password, grade):
             "is_premium": False 
         }
         supabase.table("users").insert(data).execute()
+        # مسح الكاش لضمان جلب المستخدم الجديد عند التسجيل
         get_user_data.clear() 
         return True
     except Exception:
-        return False
-
-def update_user_preferences(email, grade, language, answer_style):
-    """تحديث المستوى الدراسي واللغة وطريقة الحل في Supabase."""
-    try:
-        supabase.table("users").update({
-            "school_grade": grade,
-            "preferred_language": language,
-            "answer_style": answer_style
-        }).eq("email", email).execute()
-        get_user_data.clear() 
-        return True
-    except Exception as e:
-        st.error(f"خطأ في تحديث التفضيلات: {e}")
-        return False
-
-def update_user_usage(email, increment=False):
-    """تحديث عدد استخدامات المستخدم وإعادة تعيينها يومياً."""
-    user_data = get_user_data(email)
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    if user_data is None: 
-        return False, 0
-    
-    current_used = user_data.get('questions_used', 0)
+@@ -110,11 +97,11 @@ def update_user_usage(email, increment=False):
     last_date_str = user_data.get('last_use_date', today_str)
     is_premium = user_data.get('is_premium', False)
 
+    # منطق المستخدم المميز (Premium): لا يوجد تقييد
+    # **منطق المستخدم المميز (Premium)**
     if is_premium:
         return True, 0 
 
+    # منطق المستخدم العادي (Free)
+    # **منطق المستخدم العادي (Free)**
     if last_date_str != today_str:
         current_used = 0
-    
-    new_used = current_used
-    can_use = True
-    
-    if increment and current_used < MAX_QUESTIONS_DAILY:
-        new_used = current_used + 1
-        
-        supabase.table("users").update({
-            "questions_used": new_used, 
+
+@@ -130,65 +117,16 @@ def update_user_usage(email, increment=False):
             "last_use_date": today_str
         }).eq("email", email).execute()
-        
+
+        # مسح الكاش لضمان أن العداد يظهر التحديث الفوري
         get_user_data.clear() 
-    
+
     elif increment and current_used >= MAX_QUESTIONS_DAILY:
         can_use = False
 
     return can_use, new_used
 
+# =========================================================================
+# III. دوال تسجيل الدخول/الخروج وتذكّر المستخدم (Cookies)
+# =========================================================================
 
-# -------------------- 4. دوال عرض نماذج التسجيل والدخول (كما هي) --------------------
+def initialize_session_state_with_cookies():
+    """يهيئ حالة الجلسة عند بدء تشغيل التطبيق بناءً على الكوكي المحفوظ."""
+    # نستخدم مفتاح مختلف لمنع التداخل مع حالة المستخدم الافتراضية
+    if 'initialized_cookies_done' not in st.session_state:
+        user_from_cookie = cookie_manager.get(COOKIE_KEY_USER)
+        
+        if user_from_cookie:
+            # التحقق مرة أخرى من وجود المستخدم في Supabase (لضمان أن الحساب لم يُحذف)
+            user_data = get_user_data(user_from_cookie)
+            if user_data:
+                # تحديث حالة الجلسة بما يتوافق مع بيانات Supabase
+                st.session_state['logged_in'] = True
+                st.session_state['user_email'] = user_from_cookie
+                st.session_state['is_admin'] = user_data.get('is_admin', False) 
+                st.session_state['is_premium'] = user_data.get('is_premium', False) 
+                st.session_state['initialized_cookies_done'] = True
+                return
+
+        # إذا لم يتم العثور على كوكي أو المستخدم غير صالح
+        st.session_state['logged_in'] = False
+        st.session_state['user_email'] = None
+        st.session_state['is_admin'] = False
+        st.session_state['is_premium'] = False
+        st.session_state['initialized_cookies_done'] = True
+        
+    # يجب استدعاء هذا الأمر دائماً لحفظ التغييرات
+    cookie_manager.save()
+    
+# Call the new initializer before the main execution
+initialize_session_state_with_cookies()
+
+def logout_user():
+    """تسجيل الخروج مع حذف الكوكيز وتحديث حالة الجلسة."""
+    # حذف حالة الجلسة
+    st.session_state['logged_in'] = False
+    st.session_state['user_email'] = None
+    st.session_state['is_admin'] = False
+    st.session_state['is_premium'] = False
+    
+    # حذف الكوكي
+    cookie_manager.delete(COOKIE_KEY_USER)
+    cookie_manager.save()
+    st.info("تم تسجيل الخروج بنجاح.")
+    st.rerun()
+
+# =========================================================================
+# IV. دوال عرض نماذج التسجيل والدخول
+# =========================================================================
+# -------------------- 4. دوال عرض نماذج التسجيل والدخول --------------------
 
 def login_form():
     """عرض نموذج تسجيل الدخول."""
-    with st.form("login_form"):
-        st.subheader("تسجيل الدخول")
-        email = st.text_input("البريد الإلكتروني").strip()
-        password = st.text_input("كلمة المرور", type="password")
-        submitted = st.form_submit_button("تسجيل الدخول")
-
-        if submitted:
+@@ -202,24 +140,20 @@ def login_form():
             user_data = get_user_data(email) 
-            
-            # ملاحظة: دالة get_user_data لا تجلب كلمة المرور المشفرة افتراضياً،
-            # يجب أن يتم جلبها هنا تحديداً لعمل checkpw
-            try:
-                # جلب البيانات مع كلمة المرور المشفرة لغرض التحقق فقط
-                response = supabase.table("users").select("password_hash").eq("email", email).single().execute()
-                password_hash = response.data.get('password_hash', '')
-            except Exception:
-                password_hash = ''
-            
-            if user_data and bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8')): 
+
+            if user_data and bcrypt.checkpw(password.encode('utf-8'), user_data.get('password_hash', '').encode('utf-8')): 
+                
+                # تحديث حالة الجلسة
                 st.session_state['logged_in'] = True
                 st.session_state['user_email'] = email
+                # تخزين حالة المسؤول والوصول المميز
                 st.session_state['is_admin'] = user_data.get('is_admin', False) 
                 st.session_state['is_premium'] = user_data.get('is_premium', False) 
+                
+                # *** ميزة تذكّر المستخدم (الكوكيز) ***
+                cookie_manager.set(COOKIE_KEY_USER, email, expires_at=None)
+                cookie_manager.save()
+                
 
                 st.success("تم تسجيل الدخول بنجاح! 🥳")
                 st.rerun()
@@ -188,52 +183,28 @@ def login_form():
 
 def register_form():
     """عرض نموذج تسجيل حساب جديد."""
+    # (يبقى الكود كما هو، مع استخدام دالة add_user الجديدة)
     with st.form("register_form"):
         st.subheader("إنشاء حساب جديد")
         email = st.text_input("البريد الإلكتروني").strip()
-        password = st.text_input("كلمة المرور", type="password")
-        
-        grades = [
-            "السنة الأولى إعدادي", "السنة الثانية إعدادي", "السنة الثالثة إعدادي",
-            "الجذع المشترك العلمي",
-            "الأولى بكالوريا (علوم تجريبية)", "الأولى بكالوريا (علوم رياضية)",
-            "الثانية بكالوريا (علوم فيزيائية)", "الثانية بكالوريا (علوم الحياة والأرض)",
-            "الثانية بكالوريا (علوم رياضية)", 
+@@ -238,8 +172,7 @@ def register_form():
+            "الثانية بكالوريا (علوم رياضية)",
             "غير ذلك (جامعة/آداب/تكوين مهني)"
         ]
         
+        # استخدام بياناتك الشخصية يا أحمد كافتراضي
+        # استخدام بياناتك الشخصية يا أحمد (الثانية بكالوريا (علوم رياضية)) كمثال
         initial_grade_index = grades.index("الثانية بكالوريا (علوم رياضية)") if "الثانية بكالوريا (علوم رياضية)" in grades else 0
         grade = st.selectbox("المستوى الدراسي (النظام المغربي)", grades, index=initial_grade_index)
-        
-        language = st.radio(
-            "اللغة المفضلة للحل",
-            ["العربية (Arabe)", "الفرنسية (Français)"],
-            index=0 
-        )
-        
-        answer_style = st.selectbox(
-            "طريقة تقديم الحل",
-            [
-                "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)",
-                "الحل في خطوات منظمة وواضحة (Étapes Claires)",
-                "النتيجة النهائية والحل المباشر (Réponse Directe)"
-            ],
-            index=0 
-        )
-        
-        submitted = st.form_submit_button("تسجيل الحساب")
 
-        if submitted:
-            if not email or not password or len(password) < 6:
-                st.error("الرجاء إدخال بيانات صالحة وكلمة مرور لا تقل عن 6 أحرف.")
-                return
-
-            if add_user(email, password, grade, language, answer_style):
-                st.success("تم التسجيل بنجاح! يمكنك الآن تسجيل الدخول.")
+@@ -255,16 +188,15 @@ def register_form():
             else:
                 st.error("البريد الإلكتروني مُسجل بالفعل. حاول تسجيل الدخول.")
 
-# -------------------- 5. لوحة التحكم الإدارية (Admin Dashboard) (كما هي) --------------------
+# =========================================================================
+# V. دالة لوحة التحكم الإدارية (Admin Dashboard) 👑
+# =========================================================================
+# -------------------- 5. دالة لوحة التحكم الإدارية (Admin Dashboard) 👑 --------------------
 
 def admin_dashboard_ui():
     """عرض لوحة التحكم للمسؤولين فقط لإدارة صلاحيات المستخدمين المميزين."""
@@ -241,208 +212,131 @@ def admin_dashboard_ui():
     st.caption("هذه الصفحة متاحة لك بصفتك مسؤول المشروع.")
 
     try:
+        # جلب جميع المستخدمين (يتطلب إعداد RLS للسماح للمسؤولين بالقراءة)
         response = supabase.table("users").select("*").order("email").execute()
         users = response.data
 
-        st.subheader("إدارة الوصول المميز")
-        
+@@ -273,6 +205,7 @@ def admin_dashboard_ui():
+        # إنشاء إطار بيانات (DataFrame) قابل للتعديل
         users_df = pd.DataFrame(users)
-        
+
+        # تصفية الأعمدة وعرضها في جدول Streamlit قابل للتعديل
         edited_df = st.data_editor(
             users_df[['email', 'school_grade', 'is_premium']],
             column_config={
-                "is_premium": st.column_config.CheckboxColumn(
-                    "وصول مميز (Premium)",
-                    help="تفعيل الوصول غير المحدود لهذا المستخدم.",
-                    default=False
-                )
-            },
-            hide_index=True,
-            num_rows="fixed"
-        )
-        
-        if st.button("🚀 تحديث صلاحيات الوصول"):
+@@ -290,23 +223,23 @@ def admin_dashboard_ui():
             for index, row in edited_df.iterrows():
                 original_row = users_df[users_df['email'] == row['email']].iloc[0]
-                
+
+                # التحقق فقط إذا كان قد تم تغيير حالة is_premium
                 if original_row['is_premium'] != row['is_premium']:
+                    # تحديث Supabase
                     supabase.table("users").update({
                         "is_premium": row['is_premium']
                     }).eq("email", row['email']).execute()
-            
+
             st.success("تم تحديث صلاحيات الوصول بنجاح!")
+            # مسح الكاش لضمان جلب البيانات المحدثة
             get_user_data.clear() 
             st.rerun()
 
     except Exception as e:
-        st.error(f"خطأ في جلب بيانات لوحة التحكم: {e}")
+        st.error(f"خطأ في جلب بيانات لوحة التحكم. تأكد من إعداد سياسات الأمان (RLS) للسماح للمسؤولين بالقراءة والتحديث: {e}")
 
 
-# -------------------- 6. دالة الإعدادات (Settings Modal) ⚙️ --------------------
-
-def settings_modal(user_email):
-    """عرض نموذج يسمح للمستخدم بتغيير تفضيلاته وكلمة المرور."""
-    
-    user_data = get_user_data(user_email)
-    
-    # تعريف القوائم المشتركة
-    grades = [
-        "السنة الأولى إعدادي", "السنة الثانية إعدادي", "السنة الثالثة إعدادي",
-        "الجذع المشترك العلمي",
-        "الأولى بكالوريا (علوم تجريبية)", "الأولى بكالوريا (علوم رياضية)",
-        "الثانية بكالوريا (علوم فيزيائية)", "الثانية بكالوريا (علوم الحياة والأرض)",
-        "الثانية بكالوريا (علوم رياضية)", 
-        "غير ذلك (جامعة/آداب/تكوين مهني)"
-    ]
-    languages = ["العربية (Arabe)", "الفرنسية (Français)"]
-    answer_styles = [
-        "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)",
-        "الحل في خطوات منظمة وواضحة (Étapes Claires)",
-        "النتيجة النهائية والحل المباشر (Réponse Directe)"
-    ]
-
-    current_grade = user_data.get('school_grade')
-    current_lang = user_data.get('preferred_language')
-    current_style = user_data.get('answer_style')
-    
-    try:
-        grade_index = grades.index(current_grade) if current_grade in grades else 0
-        lang_index = languages.index(current_lang) if current_lang in languages else 0
-        style_index = answer_styles.index(current_style) if current_style in answer_styles else 0
-    except:
-        grade_index, lang_index, style_index = 0, 0, 0 
-
-    # 1. نموذج تحديث التفضيلات (لغة ومستوى ونمط)
-    with st.form("preferences_form"):
-        st.subheader("⚙️ تفضيلات الحل")
-        
-        new_grade = st.selectbox("المستوى الدراسي", grades, index=grade_index)
-        new_lang = st.radio("اللغة المفضلة للحل", languages, index=lang_index)
-        new_style = st.selectbox("طريقة تقديم الحل", answer_styles, index=style_index)
-        
-        submitted_pref = st.form_submit_button("حفظ التفضيلات")
-
-        if submitted_pref:
-            if update_user_preferences(user_email, new_grade, new_lang, new_style):
-                st.success("تم حفظ تفضيلاتك بنجاح! 🎉")
-                st.rerun()
-            else:
-                st.error("فشل حفظ التفضيلات. حاول مجدداً.")
-
-    st.markdown("---")
-    
-    # 2. نموذج تغيير كلمة المرور 🔑
-    with st.form("password_form"):
-        st.subheader("🔐 تغيير كلمة المرور")
-        
-        new_password = st.text_input("كلمة المرور الجديدة", type="password")
-        confirm_password = st.text_input("تأكيد كلمة المرور الجديدة", type="password")
-        
-        submitted_pass = st.form_submit_button("تغيير كلمة المرور")
-        
-        if submitted_pass:
-            if new_password != confirm_password:
-                st.error("كلمتا المرور غير متطابقتين.")
-            elif len(new_password) < 6:
-                st.error("يجب أن تكون كلمة المرور 6 أحرف على الأقل.")
-            elif update_user_password(user_email, new_password):
-                st.success("تم تغيير كلمة المرور بنجاح! يرجى استخدامها في المرة القادمة. 🥳")
-                # لا نحتاج لـ rerun هنا لأن المستخدم يمكنه الاستمرار
-            else:
-                st.error("فشل تغيير كلمة المرور.")
-
-
-# -------------------- 7. دالة واجهة التطبيق الرئيسية (المُعدّلة لإظهار الأيقونة) --------------------
+# =========================================================================
+# VI. دالة واجهة التطبيق الرئيسية (Main UI) مع البث (Streaming)
+# =========================================================================
+# -------------------- 6. دالة واجهة التطبيق الرئيسية (Main UI) --------------------
 
 def main_app_ui():
     """عرض واجهة التطبيق الرئيسية (حل المسائل) والتحكم بالتقييد والتخصيص."""
-    
-    # إضافة الأيقونة في الأعلى 
-    col1, col2 = st.columns([0.8, 0.2])
-    with col1:
-        st.title("🇲🇦 حلول المسائل بالذكاء الاصطناعي")
-    with col2:
-        with st.popover("⚙️", help="تغيير إعدادات اللغة والمستوى وطريقة الحل وكلمة المرور"):
-            settings_modal(st.session_state['user_email'])
-    
-    user_email = st.session_state['user_email']
+@@ -315,11 +248,10 @@ def main_app_ui():
+    st.caption("يرجى التأكد من تحميل صورة عالية الجودة مع نص واضح وتمرين واحد")
+
     is_premium = st.session_state.get('is_premium', False)
+    user_email = st.session_state['user_email']
 
     # 1. تحديث العداد وعرض حالة الاستخدام
     if not is_premium:
         can_use, current_used = update_user_usage(user_email)
-        
+        can_use, current_used = update_user_usage(st.session_state['user_email'])
+
         st.info(f"الأسئلة المجانية اليومية المتبقية: {MAX_QUESTIONS_DAILY - current_used} من {MAX_QUESTIONS_DAILY}.")
-        
-        if current_used >= MAX_QUESTIONS_DAILY:
-            st.error(f"لقد استنفدت الحد الأقصى ({MAX_QUESTIONS_DAILY}) من الأسئلة لهذا اليوم.")
-            st.stop()
-    else:
-        st.info("✅ لديك وصول مميز (Premium Access) وغير محدود!")
 
+@@ -339,13 +271,12 @@ def main_app_ui():
 
-    # 2. منطق رفع الصورة والحل
-    uploaded_file = st.file_uploader("قم بتحميل صورة المسألة", type=["png", "jpg", "jpeg"])
-
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption='صورة المسألة.', use_column_width=True)
-        
         if st.button("🚀 ابدأ الحل والتحليل"):
-            
-            if not is_premium:
-                 can_use, current_used = update_user_usage(user_email)
-                 if not can_use:
-                     st.error(f"لقد استنفدت الحد الأقصى ({MAX_QUESTIONS_DAILY}) من الأسئلة لهذا اليوم.")
-                     st.stop()
-            
+
+            # استخدام st.status لتقليل الإحساس بالانتظار وتوفير مكان للتدفق
+            with st.status("جاري تحليل الصورة وتقديم الحل... (الرد يظهر بالتدفق السريع)", expanded=True) as status:
+                
             with st.spinner('يتم تحليل الصورة وتقديم الحل...'):
                 try:
-                    
-                    full_user_data = get_user_data(user_email)
-                    user_grade = full_user_data.get('school_grade', "مستوى غير محدد")
-                    user_lang = full_user_data.get('preferred_language', "العربية (Arabe)")
-                    user_style = full_user_data.get('answer_style', "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)")
 
-                    # عرض التفضيلات للمستخدم
-                    st.markdown(f"**تفضيلاتك:** المستوى: **{user_grade}** | اللغة: **{user_lang}** | النمط: **{user_style}** ⚙️") 
-                    
+                    # 🌟 التعديل الحاسم: تخصيص الحل حسب المستوى 🌟
+                    full_user_data = get_user_data(user_email)
+                    full_user_data = get_user_data(st.session_state['user_email'])
+                    # المستوى الدراسي موجود في حقل 'school_grade'
+                    user_grade = full_user_data.get('school_grade', "مستوى غير محدد")
+
                     # إنشاء تعليمات النظام المخصصة
-                    custom_prompt = (
-                        f"{SYSTEM_PROMPT}\n"
-                        f"مستوى الطالب هو: {user_grade}. "
-                        f"يجب أن يكون الحل المقدم **باللغة {user_lang}**. "
-                        f"النمط المطلوب لتقديم الحل هو: **{user_style}**. "
-                        f"الرجاء التأكد من أن الحل مناسب تمامًا لهذا المستوى ولهذه التفضيلات المحددة."
-                    )
-                    
+@@ -358,51 +289,34 @@ def main_app_ui():
                     contents = [custom_prompt, image]
-                    
-                    # -------------------- التدفق --------------------
-                    
-                    st.subheader("📝 الحل المفصل")
-                    placeholder = st.empty() 
-                    full_response = ""
-                    
-                    response_stream = client.models.generate_content_stream(
+                    # -------------------- 🌟 نهاية التخصيص 🌟 --------------------
+
+                    # 1. استدعاء Gemini في وضع البث (Streaming)
+                    stream = client.models.generate_content_stream(
+                    response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=contents
                     )
+
+                    # 2. عرض الرد مباشرة عبر st.write_stream
+                    st.subheader("📝 الحل المفصل (يتم عرضه فورياً)")
+                    # استخدم مكان الـ status نفسه لعرض التدفق
+                    st.write_stream(stream)
                     
-                    for chunk in response_stream:
-                        full_response += chunk.text
-                        placeholder.markdown(full_response + "▌") 
-                        
-                    placeholder.markdown(full_response)
-                    st.success("تم تحليل وحل المسألة بنجاح! 🎉")
-                    
+                    # 3. تحديث الاستخدام بعد نجاح الحل (فقط للمستخدمين العاديين)
                     if not is_premium:
                         update_user_usage(user_email, increment=True) 
-                        
+                        update_user_usage(st.session_state['user_email'], increment=True) 
+
+                    # 4. تحديث حالة الـ status
+                    status.update(label="تم تحليل وحل المسألة بنجاح! 🎉", state="complete", expanded=False)
+                    st.success("تم تحليل وحل المسألة بنجاح! 🎉")
+                    st.subheader("📝 الحل المفصل")
+                    st.markdown(response.text)
+                    st.rerun()
+
                 except Exception as e:
+                    status.update(label="فشل التحليل", state="error", expanded=True)
+                    st.error(f"حدث خطأ أثناء الاتصال بالنموذج. تأكد من جودة الصورة: {e}")
                     st.error(f"حدث خطأ أثناء الاتصال بالنموذج: {e}")
-                    
-# -------------------- 8. المنطق الرئيسي للتطبيق (Main) --------------------
+
+# =========================================================================
+# VII. المنطق الرئيسي للتطبيق (Main)
+# =========================================================================
+
+# الشريط الجانبي (Side Bar)
+with st.sidebar:
+    st.image("https://placehold.co/100x100/30A4D5/ffffff?text=AI", use_column_width=False)
+    st.title("Math AI zaoujal 🧠")
+    st.markdown("---")
+    
+    # عرض معلومات المستخدم وزر الخروج
+    if st.session_state['logged_in']:
+        st.success(f"مرحباً بك: {st.session_state['user_email']}")
+        st.caption(f"المستوى: {get_user_data(st.session_state['user_email']).get('school_grade', 'غير محدد')}")
+        if st.button("🚪 تسجيل الخروج", use_container_width=True, key="logout_btn"):
+            logout_user() # استخدام دالة تسجيل الخروج الجديدة
+    
+    # منطقة الروابط (لتحديثها غداً)
+    st.markdown("---")
+    st.header("تابعوني")
+    st.markdown(f"**🎬 قناتي على يوتيوب:** [اشترك الآن]({YOUTUBE_LINK})")
+    st.markdown(f"**🔗 مشروعي الإلكتروني:** [المزيد هنا]({PROJECT_LINK})")
+# -------------------- 7. المنطق الرئيسي للتطبيق (Main) --------------------
 
 # تهيئة حالة الجلسة
 if 'logged_in' not in st.session_state:
@@ -456,22 +350,6 @@ if 'is_premium' not in st.session_state:
 
 if st.session_state['logged_in']:
     is_admin = st.session_state.get('is_admin', False)
-
-    if is_admin:
-        admin_tab, app_tab = st.tabs(["لوحة التحكم (Admin)", "حل المسائل"])
-        with admin_tab:
-            admin_dashboard_ui() 
-        with app_tab:
-            main_app_ui()
-    else:
-        main_app_ui()
-else:
-    st.header("أهلاً بك في منصة Math AI zaoujal")
-    st.subheader(f"الرجاء تسجيل الدخول أو إنشاء حساب لاستخدام خدمة حل المسائل ({MAX_QUESTIONS_DAILY} أسئلة مجانية يومياً)")
-    login_tab, register_tab = st.tabs(["تسجيل الدخول", "إنشاء حساب"])
-    
-    with login_tab:
-        login_form()
-    
+@@ -428,4 +342,3 @@ def main_app_ui():
     with register_tab:
         register_form()
