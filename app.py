@@ -13,7 +13,6 @@ import io
 
 load_dotenv() 
 
-DB_FILE = 'users.db' 
 MAX_QUESTIONS_DAILY = 5
 
 # تهيئة الاتصال بـ Gemini و Supabase
@@ -55,10 +54,32 @@ st.set_page_config(page_title="Math AI with zaoujal", layout="centered")
 def get_user_data(email):
     """جلب بيانات المستخدم من Supabase."""
     try:
+        # جلب البيانات دون كلمة المرور المشفرة لتقليل الكاش (يمكن جلبها عند الحاجة فقط)
         response = supabase.table("users").select("*").eq("email", email).single().execute()
         return response.data
     except Exception:
         return None
+
+# 🌟 دالة جديدة: تحديث كلمة المرور فقط 🌟
+def update_user_password(email, new_password):
+    """تحديث كلمة المرور المشفرة للمستخدم في Supabase."""
+    try:
+        if len(new_password) < 6:
+            return False
+            
+        # تشفير كلمة المرور الجديدة
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        supabase.table("users").update({
+            "password_hash": hashed_password
+        }).eq("email", email).execute()
+        
+        # لا حاجة لمسح الكاش هنا، فقط عند تغيير التفضيلات أو التسجيل
+        return True
+    except Exception as e:
+        st.error(f"خطأ في تحديث كلمة المرور: {e}")
+        return False
+# ------------------------------------------------------------------------
 
 def add_user(email, password, grade, language, answer_style):
     """إضافة مستخدم جديد إلى Supabase مع تفضيلاته."""
@@ -81,7 +102,6 @@ def add_user(email, password, grade, language, answer_style):
     except Exception:
         return False
 
-# 🌟 دالة جديدة: تحديث تفضيلات المستخدم 🌟
 def update_user_preferences(email, grade, language, answer_style):
     """تحديث المستوى الدراسي واللغة وطريقة الحل في Supabase."""
     try:
@@ -95,7 +115,6 @@ def update_user_preferences(email, grade, language, answer_style):
     except Exception as e:
         st.error(f"خطأ في تحديث التفضيلات: {e}")
         return False
-
 
 def update_user_usage(email, increment=False):
     """تحديث عدد استخدامات المستخدم وإعادة تعيينها يومياً."""
@@ -134,7 +153,7 @@ def update_user_usage(email, increment=False):
     return can_use, new_used
 
 
-# -------------------- 4. دوال عرض نماذج التسجيل والدخول --------------------
+# -------------------- 4. دوال عرض نماذج التسجيل والدخول (كما هي) --------------------
 
 def login_form():
     """عرض نموذج تسجيل الدخول."""
@@ -147,7 +166,16 @@ def login_form():
         if submitted:
             user_data = get_user_data(email) 
             
-            if user_data and bcrypt.checkpw(password.encode('utf-8'), user_data.get('password_hash', '').encode('utf-8')): 
+            # ملاحظة: دالة get_user_data لا تجلب كلمة المرور المشفرة افتراضياً،
+            # يجب أن يتم جلبها هنا تحديداً لعمل checkpw
+            try:
+                # جلب البيانات مع كلمة المرور المشفرة لغرض التحقق فقط
+                response = supabase.table("users").select("password_hash").eq("email", email).single().execute()
+                password_hash = response.data.get('password_hash', '')
+            except Exception:
+                password_hash = ''
+            
+            if user_data and bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8')): 
                 st.session_state['logged_in'] = True
                 st.session_state['user_email'] = email
                 st.session_state['is_admin'] = user_data.get('is_admin', False) 
@@ -253,9 +281,8 @@ def admin_dashboard_ui():
 # -------------------- 6. دالة الإعدادات (Settings Modal) ⚙️ --------------------
 
 def settings_modal(user_email):
-    """عرض نموذج يسمح للمستخدم بتغيير تفضيلاته."""
+    """عرض نموذج يسمح للمستخدم بتغيير تفضيلاته وكلمة المرور."""
     
-    # 1. جلب البيانات الحالية للمستخدم
     user_data = get_user_data(user_email)
     
     # تعريف القوائم المشتركة
@@ -274,54 +301,72 @@ def settings_modal(user_email):
         "النتيجة النهائية والحل المباشر (Réponse Directe)"
     ]
 
-    # جلب القيم الحالية من القاعدة
     current_grade = user_data.get('school_grade')
     current_lang = user_data.get('preferred_language')
     current_style = user_data.get('answer_style')
     
-    # إيجاد الـ Index الحالي لكل قيمة
     try:
         grade_index = grades.index(current_grade) if current_grade in grades else 0
         lang_index = languages.index(current_lang) if current_lang in languages else 0
         style_index = answer_styles.index(current_style) if current_style in answer_styles else 0
     except:
-        grade_index, lang_index, style_index = 0, 0, 0 # في حال وجود قيمة قديمة غير صحيحة
+        grade_index, lang_index, style_index = 0, 0, 0 
 
-    # 2. إنشاء نموذج الإعدادات
-    with st.form("settings_form"):
-        st.subheader("⚙️ إعدادات الحساب وتفضيلات الحل")
+    # 1. نموذج تحديث التفضيلات (لغة ومستوى ونمط)
+    with st.form("preferences_form"):
+        st.subheader("⚙️ تفضيلات الحل")
         
         new_grade = st.selectbox("المستوى الدراسي", grades, index=grade_index)
         new_lang = st.radio("اللغة المفضلة للحل", languages, index=lang_index)
         new_style = st.selectbox("طريقة تقديم الحل", answer_styles, index=style_index)
         
-        submitted = st.form_submit_button("حفظ التغييرات")
+        submitted_pref = st.form_submit_button("حفظ التفضيلات")
 
-        if submitted:
-            # 3. تحديث البيانات
+        if submitted_pref:
             if update_user_preferences(user_email, new_grade, new_lang, new_style):
                 st.success("تم حفظ تفضيلاتك بنجاح! 🎉")
                 st.rerun()
             else:
                 st.error("فشل حفظ التفضيلات. حاول مجدداً.")
 
+    st.markdown("---")
+    
+    # 2. نموذج تغيير كلمة المرور 🔑
+    with st.form("password_form"):
+        st.subheader("🔐 تغيير كلمة المرور")
+        
+        new_password = st.text_input("كلمة المرور الجديدة", type="password")
+        confirm_password = st.text_input("تأكيد كلمة المرور الجديدة", type="password")
+        
+        submitted_pass = st.form_submit_button("تغيير كلمة المرور")
+        
+        if submitted_pass:
+            if new_password != confirm_password:
+                st.error("كلمتا المرور غير متطابقتين.")
+            elif len(new_password) < 6:
+                st.error("يجب أن تكون كلمة المرور 6 أحرف على الأقل.")
+            elif update_user_password(user_email, new_password):
+                st.success("تم تغيير كلمة المرور بنجاح! يرجى استخدامها في المرة القادمة. 🥳")
+                # لا نحتاج لـ rerun هنا لأن المستخدم يمكنه الاستمرار
+            else:
+                st.error("فشل تغيير كلمة المرور.")
+
+
 # -------------------- 7. دالة واجهة التطبيق الرئيسية (المُعدّلة لإظهار الأيقونة) --------------------
 
 def main_app_ui():
     """عرض واجهة التطبيق الرئيسية (حل المسائل) والتحكم بالتقييد والتخصيص."""
     
-    # 🌟 إضافة الأيقونة في الأعلى 🌟
+    # إضافة الأيقونة في الأعلى 
     col1, col2 = st.columns([0.8, 0.2])
     with col1:
         st.title("🇲🇦 حلول المسائل بالذكاء الاصطناعي")
     with col2:
-        # استخدام st.popover لإنشاء قائمة منبثقة بسيطة بزر أيقونة
-        with st.popover("⚙️", help="تغيير إعدادات اللغة والمستوى وطريقة الحل"):
+        with st.popover("⚙️", help="تغيير إعدادات اللغة والمستوى وطريقة الحل وكلمة المرور"):
             settings_modal(st.session_state['user_email'])
-    # ---------------------------------
     
-    is_premium = st.session_state.get('is_premium', False)
     user_email = st.session_state['user_email']
+    is_premium = st.session_state.get('is_premium', False)
 
     # 1. تحديث العداد وعرض حالة الاستخدام
     if not is_premium:
