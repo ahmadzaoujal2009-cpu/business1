@@ -7,26 +7,22 @@ from dotenv import load_dotenv
 from PIL import Image
 from google import genai 
 from supabase import create_client, Client
-import io # لإدارة الملفات المرفوعة
+import io 
 
-# -------------------- 1. الثوابت والإعداد الأولي (مُحسن للأمان) --------------------
+# -------------------- 1. الثوابت والإعداد الأولي --------------------
 
-# (نستخدم load_dotenv لقراءة المتغيرات محليًا في بيئة التطوير فقط)
-# عند النشر على Streamlit Cloud، يتم الاعتماد كليًا على st.secrets
 load_dotenv() 
 
+DB_FILE = 'users.db' 
 MAX_QUESTIONS_DAILY = 5
 
 # تهيئة الاتصال بـ Gemini و Supabase
 try:
-    # 1. جلب المفاتيح من st.secrets (أو os.getenv محليًا)
-    # **تعديل مقترح: الاعتماد أولاً على st.secrets، وإذا لم تنجح، التحقق من os.getenv لتسهيل التطوير المحلي**
     API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
     SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
 
     if not API_KEY or not SUPABASE_URL or not SUPABASE_KEY:
-        # رسالة خطأ واضحة لأسباب التوقف
         st.error("الرجاء التأكد من إعداد جميع المفاتيح. توقف التطبيق.")
         st.stop()
         
@@ -53,8 +49,7 @@ except FileNotFoundError:
     
 st.set_page_config(page_title="Math AI with zaoujal", layout="centered")
 
-# -------------------- 3. دوال Supabase وإدارة المستخدمين (كما هي) --------------------
-# (تخطي الدوال غير المتغيرة لتركيز الإجابة)
+# -------------------- 3. دوال Supabase وإدارة المستخدمين --------------------
 
 @st.cache_data(ttl=60) 
 def get_user_data(email):
@@ -65,14 +60,16 @@ def get_user_data(email):
     except Exception:
         return None
 
-def add_user(email, password, grade):
-    """إضافة مستخدم جديد إلى Supabase."""
+def add_user(email, password, grade, language, answer_style):
+    """إضافة مستخدم جديد إلى Supabase مع تفضيلاته."""
     hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     try:
         data = {
             "email": email,
             "password_hash": hashed_password,
             "school_grade": grade,
+            "preferred_language": language, 
+            "answer_style": answer_style,
             "last_use_date": datetime.now().strftime("%Y-%m-%d"),
             "questions_used": 0,
             "is_admin": False, 
@@ -83,6 +80,22 @@ def add_user(email, password, grade):
         return True
     except Exception:
         return False
+
+# 🌟 دالة جديدة: تحديث تفضيلات المستخدم 🌟
+def update_user_preferences(email, grade, language, answer_style):
+    """تحديث المستوى الدراسي واللغة وطريقة الحل في Supabase."""
+    try:
+        supabase.table("users").update({
+            "school_grade": grade,
+            "preferred_language": language,
+            "answer_style": answer_style
+        }).eq("email", email).execute()
+        get_user_data.clear() 
+        return True
+    except Exception as e:
+        st.error(f"خطأ في تحديث التفضيلات: {e}")
+        return False
+
 
 def update_user_usage(email, increment=False):
     """تحديث عدد استخدامات المستخدم وإعادة تعيينها يومياً."""
@@ -121,7 +134,7 @@ def update_user_usage(email, increment=False):
     return can_use, new_used
 
 
-# -------------------- 4. دوال عرض نماذج التسجيل والدخول (كما هي) --------------------
+# -------------------- 4. دوال عرض نماذج التسجيل والدخول --------------------
 
 def login_form():
     """عرض نموذج تسجيل الدخول."""
@@ -152,18 +165,33 @@ def register_form():
         email = st.text_input("البريد الإلكتروني").strip()
         password = st.text_input("كلمة المرور", type="password")
         
-        # قائمة المستويات التعليمية
         grades = [
             "السنة الأولى إعدادي", "السنة الثانية إعدادي", "السنة الثالثة إعدادي",
             "الجذع المشترك العلمي",
             "الأولى بكالوريا (علوم تجريبية)", "الأولى بكالوريا (علوم رياضية)",
             "الثانية بكالوريا (علوم فيزيائية)", "الثانية بكالوريا (علوم الحياة والأرض)",
-            "الثانية بكالوريا (علوم رياضية)", # المستوى الخاص بأحمد الطنطاوي
+            "الثانية بكالوريا (علوم رياضية)", 
             "غير ذلك (جامعة/آداب/تكوين مهني)"
         ]
         
         initial_grade_index = grades.index("الثانية بكالوريا (علوم رياضية)") if "الثانية بكالوريا (علوم رياضية)" in grades else 0
         grade = st.selectbox("المستوى الدراسي (النظام المغربي)", grades, index=initial_grade_index)
+        
+        language = st.radio(
+            "اللغة المفضلة للحل",
+            ["العربية (Arabe)", "الفرنسية (Français)"],
+            index=0 
+        )
+        
+        answer_style = st.selectbox(
+            "طريقة تقديم الحل",
+            [
+                "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)",
+                "الحل في خطوات منظمة وواضحة (Étapes Claires)",
+                "النتيجة النهائية والحل المباشر (Réponse Directe)"
+            ],
+            index=0 
+        )
         
         submitted = st.form_submit_button("تسجيل الحساب")
 
@@ -172,12 +200,12 @@ def register_form():
                 st.error("الرجاء إدخال بيانات صالحة وكلمة مرور لا تقل عن 6 أحرف.")
                 return
 
-            if add_user(email, password, grade):
+            if add_user(email, password, grade, language, answer_style):
                 st.success("تم التسجيل بنجاح! يمكنك الآن تسجيل الدخول.")
             else:
                 st.error("البريد الإلكتروني مُسجل بالفعل. حاول تسجيل الدخول.")
 
-# -------------------- 5. دالة لوحة التحكم الإدارية (Admin Dashboard) (كما هي) --------------------
+# -------------------- 5. لوحة التحكم الإدارية (Admin Dashboard) (كما هي) --------------------
 
 def admin_dashboard_ui():
     """عرض لوحة التحكم للمسؤولين فقط لإدارة صلاحيات المستخدمين المميزين."""
@@ -222,18 +250,82 @@ def admin_dashboard_ui():
         st.error(f"خطأ في جلب بيانات لوحة التحكم: {e}")
 
 
-# -------------------- 6. دالة واجهة التطبيق الرئيسية (المُعدّلة للتدفق) --------------------
+# -------------------- 6. دالة الإعدادات (Settings Modal) ⚙️ --------------------
+
+def settings_modal(user_email):
+    """عرض نموذج يسمح للمستخدم بتغيير تفضيلاته."""
+    
+    # 1. جلب البيانات الحالية للمستخدم
+    user_data = get_user_data(user_email)
+    
+    # تعريف القوائم المشتركة
+    grades = [
+        "السنة الأولى إعدادي", "السنة الثانية إعدادي", "السنة الثالثة إعدادي",
+        "الجذع المشترك العلمي",
+        "الأولى بكالوريا (علوم تجريبية)", "الأولى بكالوريا (علوم رياضية)",
+        "الثانية بكالوريا (علوم فيزيائية)", "الثانية بكالوريا (علوم الحياة والأرض)",
+        "الثانية بكالوريا (علوم رياضية)", 
+        "غير ذلك (جامعة/آداب/تكوين مهني)"
+    ]
+    languages = ["العربية (Arabe)", "الفرنسية (Français)"]
+    answer_styles = [
+        "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)",
+        "الحل في خطوات منظمة وواضحة (Étapes Claires)",
+        "النتيجة النهائية والحل المباشر (Réponse Directe)"
+    ]
+
+    # جلب القيم الحالية من القاعدة
+    current_grade = user_data.get('school_grade')
+    current_lang = user_data.get('preferred_language')
+    current_style = user_data.get('answer_style')
+    
+    # إيجاد الـ Index الحالي لكل قيمة
+    try:
+        grade_index = grades.index(current_grade) if current_grade in grades else 0
+        lang_index = languages.index(current_lang) if current_lang in languages else 0
+        style_index = answer_styles.index(current_style) if current_style in answer_styles else 0
+    except:
+        grade_index, lang_index, style_index = 0, 0, 0 # في حال وجود قيمة قديمة غير صحيحة
+
+    # 2. إنشاء نموذج الإعدادات
+    with st.form("settings_form"):
+        st.subheader("⚙️ إعدادات الحساب وتفضيلات الحل")
+        
+        new_grade = st.selectbox("المستوى الدراسي", grades, index=grade_index)
+        new_lang = st.radio("اللغة المفضلة للحل", languages, index=lang_index)
+        new_style = st.selectbox("طريقة تقديم الحل", answer_styles, index=style_index)
+        
+        submitted = st.form_submit_button("حفظ التغييرات")
+
+        if submitted:
+            # 3. تحديث البيانات
+            if update_user_preferences(user_email, new_grade, new_lang, new_style):
+                st.success("تم حفظ تفضيلاتك بنجاح! 🎉")
+                st.rerun()
+            else:
+                st.error("فشل حفظ التفضيلات. حاول مجدداً.")
+
+# -------------------- 7. دالة واجهة التطبيق الرئيسية (المُعدّلة لإظهار الأيقونة) --------------------
 
 def main_app_ui():
     """عرض واجهة التطبيق الرئيسية (حل المسائل) والتحكم بالتقييد والتخصيص."""
     
-    st.title("🇲🇦 حلول المسائل بالذكاء الاصطناعي")
+    # 🌟 إضافة الأيقونة في الأعلى 🌟
+    col1, col2 = st.columns([0.8, 0.2])
+    with col1:
+        st.title("🇲🇦 حلول المسائل بالذكاء الاصطناعي")
+    with col2:
+        # استخدام st.popover لإنشاء قائمة منبثقة بسيطة بزر أيقونة
+        with st.popover("⚙️", help="تغيير إعدادات اللغة والمستوى وطريقة الحل"):
+            settings_modal(st.session_state['user_email'])
+    # ---------------------------------
     
     is_premium = st.session_state.get('is_premium', False)
+    user_email = st.session_state['user_email']
 
     # 1. تحديث العداد وعرض حالة الاستخدام
     if not is_premium:
-        can_use, current_used = update_user_usage(st.session_state['user_email'])
+        can_use, current_used = update_user_usage(user_email)
         
         st.info(f"الأسئلة المجانية اليومية المتبقية: {MAX_QUESTIONS_DAILY - current_used} من {MAX_QUESTIONS_DAILY}.")
         
@@ -253,65 +345,59 @@ def main_app_ui():
         
         if st.button("🚀 ابدأ الحل والتحليل"):
             
-            # 1. التحقق مرة أخرى من إمكانية الاستخدام للمستخدمين العاديين قبل البدء
             if not is_premium:
-                 # يجب أن نتحقق من `can_use` مرة أخرى هنا قبل الزيادة
-                 can_use, current_used = update_user_usage(st.session_state['user_email'])
+                 can_use, current_used = update_user_usage(user_email)
                  if not can_use:
                      st.error(f"لقد استنفدت الحد الأقصى ({MAX_QUESTIONS_DAILY}) من الأسئلة لهذا اليوم.")
                      st.stop()
             
             with st.spinner('يتم تحليل الصورة وتقديم الحل...'):
                 try:
-                    # 🌟 التعديل الحاسم: تخصيص الحل حسب المستوى 🌟
-                    full_user_data = get_user_data(st.session_state['user_email'])
-                    user_grade = full_user_data.get('school_grade', "مستوى غير محدد")
                     
-                    # عرض المستوى للمستخدم (تحسين UX)
-                    st.markdown(f"**ملاحظة:** سيتم تقديم الحل مخصصاً لمستوى: **{user_grade}** 📚") 
+                    full_user_data = get_user_data(user_email)
+                    user_grade = full_user_data.get('school_grade', "مستوى غير محدد")
+                    user_lang = full_user_data.get('preferred_language', "العربية (Arabe)")
+                    user_style = full_user_data.get('answer_style', "الحل مع شرح مفصل وتوضيحات (Explication Détaillée)")
+
+                    # عرض التفضيلات للمستخدم
+                    st.markdown(f"**تفضيلاتك:** المستوى: **{user_grade}** | اللغة: **{user_lang}** | النمط: **{user_style}** ⚙️") 
                     
                     # إنشاء تعليمات النظام المخصصة
                     custom_prompt = (
                         f"{SYSTEM_PROMPT}\n"
-                        f"مستوى الطالب هو: {user_grade}. يجب أن يكون الحل المفصل المقدم مناسبًا تمامًا لهذا المستوى التعليمي المحدد في النظام المغربي، مع التركيز على المنهجيات التي تدرس في هذا المستوى."
+                        f"مستوى الطالب هو: {user_grade}. "
+                        f"يجب أن يكون الحل المقدم **باللغة {user_lang}**. "
+                        f"النمط المطلوب لتقديم الحل هو: **{user_style}**. "
+                        f"الرجاء التأكد من أن الحل مناسب تمامًا لهذا المستوى ولهذه التفضيلات المحددة."
                     )
                     
-                    # تجميع المحتوى: التعليمات المخصصة + الصورة
                     contents = [custom_prompt, image]
                     
-                    # -------------------- 🚀 التعديل الأهم: استخدام التدفق 🚀 --------------------
+                    # -------------------- التدفق --------------------
                     
                     st.subheader("📝 الحل المفصل")
-                    # استخدام st.empty لإنشاء حاوية سيتم تحديثها بالتدفق
                     placeholder = st.empty() 
                     full_response = ""
                     
-                    # استدعاء API التدفق
                     response_stream = client.models.generate_content_stream(
                         model='gemini-2.5-flash', 
                         contents=contents
                     )
                     
-                    # التكرار على الأجزاء وعرضها فوراً
                     for chunk in response_stream:
                         full_response += chunk.text
-                        placeholder.markdown(full_response + "▌") # إضافة المؤشر لتحسين تجربة القراءة
+                        placeholder.markdown(full_response + "▌") 
                         
-                    # إزالة المؤشر النهائي وتثبيت الاستجابة
                     placeholder.markdown(full_response)
                     st.success("تم تحليل وحل المسألة بنجاح! 🎉")
                     
-                    # 3. تحديث الاستخدام بعد نجاح الحل (فقط للمستخدمين العاديين)
                     if not is_premium:
-                        update_user_usage(st.session_state['user_email'], increment=True) 
-                    
-                    # 4. إزالة st.rerun() غير الضرورية (تحسين الأداء)
-                    # st.rerun() # مُزال
+                        update_user_usage(user_email, increment=True) 
                         
                 except Exception as e:
                     st.error(f"حدث خطأ أثناء الاتصال بالنموذج: {e}")
                     
-# -------------------- 7. المنطق الرئيسي للتطبيق (Main) (كما هو) --------------------
+# -------------------- 8. المنطق الرئيسي للتطبيق (Main) --------------------
 
 # تهيئة حالة الجلسة
 if 'logged_in' not in st.session_state:
